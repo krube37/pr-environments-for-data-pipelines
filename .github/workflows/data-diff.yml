@@ -1,0 +1,108 @@
+name: PR Data Diff
+
+on:
+  pull_request:
+    types: [opened, synchronize, labeled]
+    paths:
+      - 'dbt/**'
+
+permissions:
+  id-token: write
+  pull-requests: write
+  contents: read
+
+env:
+  # From `terraform output` in terraform/ — nothing here is a secret, WIF
+  # has no key material to protect.
+  PROJECT_ID: celestial-gist-507820-p0
+  WORKLOAD_IDENTITY_PROVIDER: projects/567871847573/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+  SERVICE_ACCOUNT: pr-data-diff-ci@celestial-gist-507820-p0.iam.gserviceaccount.com
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      models: ${{ steps.changed.outputs.models }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Deliberately just git diff on filenames, not dbt manifest state
+      # comparison — that's out of scope, and this is a 4-model demo.
+      - id: changed
+        run: |
+          models=$(git diff --name-only \
+              "${{ github.event.pull_request.base.sha }}" \
+              "${{ github.event.pull_request.head.sha }}" \
+              -- 'dbt/models/**/*.sql' \
+            | xargs -n1 basename | sed 's/\.sql$//' | tr '\n' ' ')
+          echo "models=$models" >> "$GITHUB_OUTPUT"
+
+  data-diff:
+    needs: detect-changes
+    if: needs.detect-changes.outputs.models != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - id: auth
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Clone prod into a PR-scoped dataset
+        env:
+          PR_DATASET: pr_${{ github.event.pull_request.number }}
+        run: |
+          # Delete-then-recreate so a second push to the same PR (synchronize)
+          # gets a fresh clone instead of erroring on an already-existing one.
+          bq rm -r -f -d "${PROJECT_ID}:${PR_DATASET}" 2>/dev/null || true
+          bq mk --dataset --default_table_expiration=172800 "${PROJECT_ID}:${PR_DATASET}"
+          bq query --use_legacy_sql=false \
+            "CREATE TABLE \`${PROJECT_ID}.${PR_DATASET}.orders\` CLONE \`${PROJECT_ID}.prod.orders\`"
+          bq query --use_legacy_sql=false \
+            "CREATE TABLE \`${PROJECT_ID}.${PR_DATASET}.customers\` CLONE \`${PROJECT_ID}.prod.customers\`"
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - run: pip install -r scripts/requirements.txt
+
+      - name: dbt build against the PR dataset
+        env:
+          GCP_PROJECT_ID: ${{ env.PROJECT_ID }}
+          BQ_DATASET: pr_${{ github.event.pull_request.number }}
+        run: dbt build --project-dir dbt --profiles-dir dbt
+
+      - name: Diff changed models against prod
+        id: diff
+        run: |
+          set +e
+          python scripts/diff.py \
+            --project "${PROJECT_ID}" \
+            --pr-dataset "pr_${{ github.event.pull_request.number }}" \
+            --models ${{ needs.detect-changes.outputs.models }} \
+            --output diff.md
+          echo "exit_code=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on the PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh pr comment "${{ github.event.pull_request.number }}" --body-file diff.md
+
+      - name: Enforce the check
+        if: steps.diff.outputs.exit_code != '0'
+        run: |
+          if [[ "${{ contains(github.event.pull_request.labels.*.name, 'data-diff:accept') }}" == "true" ]]; then
+            echo "Breaking change accepted via the data-diff:accept label."
+          else
+            echo "Breaking change found — see the PR comment."
+            exit 1
+          fi

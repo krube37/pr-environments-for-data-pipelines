@@ -1,0 +1,26 @@
+version: 2
+
+sources:
+  - name: prod
+    dataset: "{{ env_var('BQ_DATASET') }}"
+    tables:
+      - name: orders
+      - name: customers
+
+models:
+  - name: stg_orders
+    columns:
+      - name: order_id
+        tests:
+          - unique
+      - name: customer_id
+        tests:
+          - not_null
+
+  - name: stg_customers
+    columns:
+      - name: segment
+        tests:
+          - accepted_values:
+              arguments:
+                values: ['consumer', 'smb', 'enterprise']

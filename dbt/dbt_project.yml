@@ -1,0 +1,19 @@
+name: 'pr_data_diff'
+version: '1.0.0'
+config-version: 2
+
+profile: 'pr_data_diff'
+
+model-paths: ["models"]
+test-paths: ["tests"]
+
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  pr_data_diff:
+    staging:
+      +materialized: view
+    marts:
+      +materialized: table

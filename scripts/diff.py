@@ -60,6 +60,22 @@ def diff_row_count(pr_count, prod_count):
 def diff_table(client, project, pr_dataset, prod_dataset, table):
     pr_cols = get_columns(client, project, pr_dataset, table)
     prod_cols = get_columns(client, project, prod_dataset, table)
+
+    if not pr_cols and prod_cols:
+        # The table doesn't exist in the PR dataset at all — most likely
+        # dbt build skipped this model because an upstream test failed.
+        # Querying COUNT(*) on it would raise NotFound, so stop here with
+        # a clear message instead of a raw traceback.
+        lines = [
+            "⚠️ **Breaking change — check failed**", "",
+            f"`{table}` in `{pr_dataset}`", "", "```",
+            "TABLE NOT FOUND — model did not build in this PR's dataset",
+            "(check the dbt build log; a failed upstream test likely skipped it)",
+            "```", "",
+            "Override with the `data-diff:accept` label.",
+        ]
+        return "\n".join(lines), True
+
     schema_lines, schema_breaking = diff_schema(pr_cols, prod_cols)
 
     pr_count = get_row_count(client, project, pr_dataset, table)

@@ -9,8 +9,11 @@ variable "bq_location" {
   default     = "US"
 }
 
-variable "github_repo" {
-  description = "GitHub repo allowed to assume the CI service account, as \"owner/repo\""
-  type        = string
-  default     = "krube37/pr-environments-for-data-pipelines"
+variable "github_repos" {
+  description = "GitHub repos allowed to assume the CI service account, each as \"owner/repo\""
+  type        = list(string)
+  default = [
+    "krube37/pr-environments-for-data-pipelines",
+    "radhagayathris-cmd/pr-environments-for-data-pipelines",
+  ]
 }

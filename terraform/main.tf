@@ -17,9 +17,9 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.repository" = "assertion.repository"
   }
 
-  # Scopes the whole pool to this one repo, not the GitHub org — the
-  # attribute the interviewer will ask about first.
-  attribute_condition = "assertion.repository == \"${var.github_repo}\""
+  # Scopes the whole pool to this specific list of repos, not the GitHub
+  # org — the attribute the interviewer will ask about first.
+  attribute_condition = "assertion.repository in ${jsonencode(var.github_repos)}"
 
   oidc {
     issuer_uri = "https://token.actions.githubusercontent.com"
@@ -31,10 +31,14 @@ resource "google_service_account" "ci" {
   display_name = "PR data-diff CI"
 }
 
+# One binding per trusted repo — the provider's attribute_condition above
+# controls who CAN present a token at all, this controls who that token
+# lets impersonate. Each repo maps to its own principalSet identity.
 resource "google_service_account_iam_member" "wif_impersonation" {
+  for_each           = toset(var.github_repos)
   service_account_id = google_service_account.ci.name
-  role                = "roles/iam.workloadIdentityUser"
-  member              = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${var.github_repo}"
+  role               = "roles/iam.workloadIdentityUser"
+  member             = "principalSet://iam.googleapis.com/${google_iam_workload_identity_pool.github.name}/attribute.repository/${each.value}"
 }
 
 # Unconditioned on purpose: creating pr_<N> is a project-level permission,
@@ -67,7 +71,7 @@ resource "google_bigquery_dataset" "prod" {
 }
 
 # Narrow read grant so the CI SA can clone FROM prod — the conditioned
-# dataEditor role above deliberately does not match "prod".
+# dataOwner role above deliberately does not match "prod".
 resource "google_bigquery_dataset_iam_member" "prod_reader" {
   dataset_id = google_bigquery_dataset.prod.dataset_id
   role       = "roles/bigquery.dataViewer"
